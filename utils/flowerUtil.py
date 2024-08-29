@@ -18,15 +18,17 @@ class FlowerUtil:
 
     # Gets the most used colors in a flower image, specifically around the flower. 
     def get_top_colors(self, image_url: str, num_colors: int = 5):
-        img_rgb = self.flower_outline_detect(image_url)
+        img_rgb, mask = self.flower_outline_detect(image_url)
         if img_rgb is None:
             return None, None
+        masked_img = cv2.bitwise_and(img_rgb, img_rgb, mask=mask)
 
-        img_pil = Image.fromarray(img_rgb)
+        img_pil = Image.fromarray(masked_img)
         img_pil = img_pil.convert('RGB')
         img_pil = img_pil.resize((100, 100))
 
         pixels = img_pil.getdata()
+        pixels = [pixel for pixel in pixels if pixel != (0, 0, 0)]
         color_counts = Counter(pixels)
         top_colors = color_counts.most_common(num_colors)
 
@@ -52,7 +54,7 @@ class FlowerUtil:
         img_array = np.frombuffer(response.content, np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
+        img_rgb = cv2.convertScaleAbs(img_rgb, alpha=1.5, beta=0)
         blr = cv2.GaussianBlur(img_rgb, (9, 9), 0)
 
 
@@ -64,39 +66,50 @@ class FlowerUtil:
         hed = net.forward() 
         hed = cv2.resize(hed[0, 0], (W, H)) 
         hed = (255 * hed).astype("uint8") 
-        
-        # Thresholding to create a binary image
+
         _, binary_hed = cv2.threshold(hed, 85, 255, cv2.THRESH_BINARY)
-        
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        closed_hed = cv2.morphologyEx(binary_hed, cv2.MORPH_CLOSE, kernel)
+
         # Finding contours
-        contours, _ = cv2.findContours(binary_hed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(closed_hed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         print(len(contours))
-        # Filter out small contours (optional)
-        min_contour_area = 1000  # Adjust as needed
+        
+        min_contour_area = 1000
         contours = [c for c in contours if cv2.contourArea(c) > min_contour_area]
         
         if len(contours) == 0:
             print("No contours found.")
             return None
         
-        # Finding the largest contour by area
+        # Finding the central contour
+        image_center = np.array([W // 2, H // 2])
+        min_distance = float('inf')
+        middle_contour = None
+        for contour in contours:
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])    
+                distance = np.linalg.norm(image_center - np.array([cx, cy]))
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    middle_contour = contour
+
         largest_contour = max(contours, key=cv2.contourArea)
         
-        # Create a bounding rectangle around the largest contour
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        cv2.rectangle(img_rgb, (x, y), (x+w, y+h), (255, 0, 0), 2)  # Blue rectangle with thickness 2
-        
-        # Optionally display the images
+        # Create a mask for the contours
+        mask = np.zeros(img_rgb.shape[:2], dtype=np.uint8)
+        cv2.drawContours(mask, [largest_contour, middle_contour], -1, 255, thickness=cv2.FILLED)
+
+        x1, y1, w1, h1 = cv2.boundingRect(largest_contour)
+        x2, y2, w2, h2 = cv2.boundingRect(middle_contour)
+        cv2.rectangle(img_rgb, (x1, y1), (x1+w1, y1+h1), (255, 0, 0), 2)
+        cv2.rectangle(img_rgb, (x2, y2), (x2+w2, y2+h2), (0, 255, 0), 2)
         cv2.imshow("HED", hed)
         cv2.imshow("Largest Contour with Bounding Box", img_rgb)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
         
-        return img_rgb
-
-'''
-u = FlowerUtil()
-top_colors, hsv_values = u.get_top_colors('https://storage.googleapis.com/flower-db-prd/da135b925febb70955ddf7e4d7e1eac6.jpg')
-print("Top Colors:", top_colors)
-print("HSV Values:", hsv_values)
-'''
+        return img_rgb, mask
